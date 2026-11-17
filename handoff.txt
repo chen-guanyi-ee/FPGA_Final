@@ -1,0 +1,129 @@
+FPGA Snooker Renderer Handoff
+=============================
+
+Current status
+--------------
+- Final 1024x768 @ 60 Hz design uses a 65 MHz pixel/core clock.
+- Latest bitstream was generated at 2026-11-17 22:27 and programmed successfully;
+  JTAG reported DONE=1.
+- Final routed result: 8,564 / 15,850 slices (54.03%), 21,828 LUTs,
+  18,549 FFs, 35.5 BRAM tiles, and 39 DSPs.
+- Timing recovery passed with setup WNS +0.006 ns; DRC has 0 errors.
+- Bitstream: build_bram_impl/snooker_bram.bit
+- Reports: build_bram_impl/util_recovered.rpt,
+  build_bram_impl/timing_recovered.rpt, build_bram_impl/drc_recovered.rpt.
+- Physics regression exactly matches all 43,940 golden trace lines; maximum
+  physics frame latency remains 6,054 cycles.
+- Focused low-camera regression passes. Cue ball projects to about x=512,
+  y=556, radius=36 pixels in the first-person view.
+- COM5 mouse control GUI was launched after programming.
+
+Final functional fixes
+----------------------
+- line_setup: changed the horizontal ray-origin offset from the old 800-wide
+  centre (400 pixels) to the XGA centre (512 pixels). camera_proj already used
+  512, so the stale constant shifted the table/rails and all world-space lines
+  by 112 pixels relative to the projected balls, making prediction lines look
+  detached and balls appear to enter the cushion.
+- camera_proj/gen_roms: widened low-view vertical projection fields from signed
+  14-bit to signed 15-bit. The old cue-ball value 8,901 wrapped negative, so the
+  center-view ball vanished while the top view and minimap remained correct.
+- top_nexys: set UART_CLKS_PER_BIT=564 for 65 MHz / 115200 baud. The old value
+  347 belonged to the former 40 MHz clock and caused COM5 packets to be ignored.
+- game_ctrl: reset now waits for physics busy to deassert after BRAM
+  initialization rather than waiting only two clocks.
+- top_nexys: removed/tied off the board LED and seven-segment status display
+  path while retaining the VGA renderer.
+- Ball physics state remains stored in two true-dual-port BRAM banks; simulation
+  confirms GAME/PRED separation and exact physics behavior.
+
+Completed changes
+-----------------
+- Replaced four background samples per pixel with one center sample.
+- Removed the duplicate second line_setup instance.
+- Replaced duplicated n_* and s* renderer slot FF banks with one packed
+  render_slot_t interface and sequential slot writes: slot_clear, slot_we,
+  slot_addr, and slot_data.
+- Kept GAME/PRED physics banks separate because prediction must not modify the
+  active game state.
+- Kept camera work/commit banks separate because they prevent frame tearing.
+- Changed output timing and projection constants from 800x600 to 1024x768.
+- Changed the background to a solid light-blue sky and light-green ground.
+- Made bitstream generation optional so implementation can stop after reports.
+
+Modified files
+--------------
+- rtl/renderer.sv: single-sample renderer and direct packed slot storage.
+- rtl/ball_slots.sv: packed slot records sent directly to the renderer.
+- rtl/line_setup.sv: used once; duplicate setup datapath removed.
+- rtl/vga_timing.sv: VESA 1024x768 timings, negative HSYNC/VSYNC.
+- rtl/camera_proj.sv: projection center and clipping updated for XGA.
+- rtl/hud.sv: HUD, minimap, tip panel, and cue positions moved for XGA.
+- rtl/top_nexys.sv: MMCM changed from 40 MHz to 65 MHz; core timing parameters
+  scaled to CLK_HZ=65,000,000.
+- tools/constants.py: SCREEN_W=1024 and SCREEN_H=768.
+- tools/gen_roms.py: sky RGB=(135,206,235), ground RGB=(144,238,144).
+- scripts/build.tcl: write_bitstream skipped when SKIP_BITSTREAM=1.
+
+Last completed PPA result: optimized 800x600 build
+-------------------------------------------------
+- Device: XC7A100T-CSG324-1
+- Slices: 11,352 / 15,850 = 71.62%
+- LUTs: 32,608 = 51.43%
+- FFs: 21,991 = 17.34%
+- BRAM: 20.5 tiles
+- DSPs: 39
+- Setup WNS: +2.969 ns
+- Hold slack: +0.021 ns
+- Estimated total power: 0.381 W
+- Estimated dynamic power: 0.282 W
+- Power confidence was low; use it only as a comparison value.
+- Renderer hierarchy: about 6,348 LUTs.
+- Physics hierarchy: about 18,254 LUTs and remains the largest LUT consumer.
+- Archived reports and old bitstream: build_800x600_final/
+
+What to check when the XGA run finishes
+---------------------------------------
+1. Check build/timing.rpt for WNS and hold slack.
+2. Check build/util.rpt and build/util_hier.rpt for slice/LUT growth.
+3. Check build/power.rpt and its confidence level.
+4. Confirm report timestamps are newer than the XGA run start.
+5. Do not generate/program a bitstream until timing and DRC are acceptable.
+
+Rejected or deferred ideas
+--------------------------
+- Two cycles per pixel / updating every second frame: rejected for direct VGA
+  scanout. VGA still needs one pixel every 65 MHz clock. This only works with a
+  full framebuffer and a separate scanout domain.
+- Halving frame rate for resolution: rejected. Non-standard low-refresh VGA
+  reduces compatibility and does not remove the one-pixel-per-clock scanout.
+- Merging GAME and PRED banks: rejected; prediction would corrupt/stall live
+  physics state.
+- Merging camera work and commit banks: rejected; partial updates can tear.
+- Moving the small active slot array to BRAM: rejected for now. Many fields are
+  needed in parallel per pixel, requiring BRAM replication or serialization.
+- Forcing large slot structures into LUTRAM: deferred; asynchronous parallel
+  reads and routing may worsen timing.
+- Unsafe multicycle constraints for 65 MHz: rejected. Constraints must reflect
+  real latency, not hide failing paths.
+- Two renderer copies or multisample antialiasing: rejected because it multiplies
+  LUT/DSP cost and no meaningful aliasing problem was visible.
+
+Recommended next step if 65 MHz timing fails
+--------------------------------------------
+- Do not relax timing artificially.
+- Split into a 65 MHz VGA/render domain and a 40 MHz game/physics domain.
+- Transfer stable frame-level state through a proper snapshot/CDC scheme.
+- Re-run implementation and compare against the archived 800x600 baseline.
+
+Possible low-risk follow-up
+---------------------------
+- rom_sync forces block RAM. Tiny 64x8 rom_lx/rom_ly tables could use selectable
+  distributed ROM to avoid full RAMB18 use. BRAM is not the main limit.
+- Three gamma ROM copies are intentional for simultaneous RGB addresses.
+
+References reviewed
+-------------------
+- https://github.com/toivoh/rastrgrafx
+- https://docs.amd.com/r/2022.2-English/ug901-vivado-synthesis/ROM_STYLE
+- https://github.com/projf/display_controller/blob/main/doc/display-params.md
